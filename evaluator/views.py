@@ -27,10 +27,10 @@ DEFAULT_RUBRIC = (
 
 # ----- Helpers -----
 def build_prompt(job_desc: str, cv_text: str, report_text: str, rubric: str) -> str:
-    """
+    '''
     Build the structured prompt for the LLM evaluation.
-    """
-    return f"""
+    '''
+    return f'''
 JOB_DESCRIPTION:
 {job_desc}
 
@@ -50,7 +50,7 @@ Return ONLY a JSON object with keys:
 - project_score: float 0-10
 - project_feedback: string
 - overall_summary: string (2-4 sentences)
-"""
+'''
 
 
 def process_job(job_id: int, model_slug: str) -> None:
@@ -86,6 +86,13 @@ def process_job(job_id: int, model_slug: str) -> None:
             retries=3,
         )
 
+        # --- Handle rate limit explicitly ---
+        if isinstance(out, dict) and out.get('code') == 429:
+            job.result = out
+            job.status = 'rate_limited'
+            job.save(update_fields=['result', 'status'])
+            return
+
         # Validate and save
         try:
             validate_evaluation_result(out)
@@ -107,9 +114,9 @@ def process_job(job_id: int, model_slug: str) -> None:
 
 # ----- API Views -----
 class UploadView(APIView):
-    """
+    '''
     Upload a CV and project report, creates a Job entry.
-    """
+    '''
     def post(self, request):
         serializer = UploadSerializer(data=request.data)
         if serializer.is_valid():
@@ -119,11 +126,11 @@ class UploadView(APIView):
 
 
 class EvaluateView(APIView):
-    """
+    '''
     POST /evaluate
     Start evaluation for a given job_id.
     Runs asynchronously and returns immediately.
-    """
+    '''
     def post(self, request):
         job_id = request.data.get('id')
         if not job_id:
@@ -143,10 +150,10 @@ class EvaluateView(APIView):
 
 
 class ResultView(APIView):
-    """
+    '''
     GET /result/{id}
     Retrieve the current status and result of the evaluation job.
-    """
+    '''
     def get(self, request, job_id: int):
         try:
             job = Job.objects.get(id=job_id)
