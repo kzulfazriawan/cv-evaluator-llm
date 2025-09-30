@@ -1,0 +1,10 @@
+# Core framework
+Django>=5.0
+djangorestframework>=3.15
+Pillow>=10.4
+python-decouple>=3.8
+pyyaml
+requests
+python-decouple
+PyPDF2
+python-docx
