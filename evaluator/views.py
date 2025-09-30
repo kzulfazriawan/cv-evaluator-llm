@@ -1,4 +1,3 @@
-# evaluator/views.py
 import threading
 import traceback
 from rest_framework.views import APIView
@@ -7,22 +6,29 @@ from rest_framework import status
 from django.conf import settings
 from decouple import config
 
-from .models import Job
-from .serializer import UploadSerializer, JobResultSerializer
-from .utils import read_uploaded_file_text
-from .llm import call_openrouter_chat
-from .validate import validate_evaluation_result
+from evaluator.models import Job
+from evaluator.serializer import UploadSerializer, JobResultSerializer
+from evaluator.utils import read_uploaded_file_text
+from evaluator.llm import OpenRouterClient
+from evaluator.validate import validate_evaluation_result
 
 
+# ----- Constants -----
 SYSTEM_INSTRUCTION = (
-    "You are an expert backend hiring evaluator. "
-    "YOU MUST RETURN ONLY A VALID JSON OBJECT and nothing else."
+    'You are an expert backend hiring evaluator. '
+    'YOU MUST RETURN ONLY A VALID JSON OBJECT and nothing else.'
+)
+
+DEFAULT_RUBRIC = (
+    'Correctness (1-5), Code Quality (1-5), Resilience (1-5), '
+    'Documentation (1-5), Creativity (1-5)'
 )
 
 
-def build_prompt(job_desc, cv_text, report_text, rubric):
+# ----- Helpers -----
+def build_prompt(job_desc: str, cv_text: str, report_text: str, rubric: str) -> str:
     """
-    Build the prompt that will be sent to the LLM.
+    Build the structured prompt for the LLM evaluation.
     """
     return f"""
 JOB_DESCRIPTION:
@@ -47,36 +53,32 @@ Return ONLY a JSON object with keys:
 """
 
 
-def process_job(job_id, model_slug):
+def process_job(job_id: int, model_slug: str) -> None:
     """
-    Background worker: processes a Job by calling OpenRouter,
-    validating the response, and saving it.
+    Background worker: processes a Job by calling the LLM,
+    validating the response, and saving the result.
     """
     job = Job.objects.get(id=job_id)
-    job.status = "processing"
-    job.save()
+    job.status = 'processing'
+    job.save(update_fields=['status'])
 
-    cv_text = read_uploaded_file_text(job.cv_file) if job.cv_file else ""
-    report_text = read_uploaded_file_text(job.report_file) if job.report_file else ""
+    cv_text = read_uploaded_file_text(job.cv_file) if job.cv_file else ''
+    report_text = read_uploaded_file_text(job.report_file) if job.report_file else ''
 
-    # You can store the real job description in settings or database.
     job_desc = getattr(
         settings,
-        "JOB_DESCRIPTION_TEXT",
-        "Backend Product Engineer: Django, REST, RAG, LLM"
-    )
-    rubric = (
-        "Correctness (1-5), Code Quality (1-5), Resilience (1-5), "
-        "Documentation (1-5), Creativity (1-5)"
+        'JOB_DESCRIPTION_TEXT',
+        'Backend Product Engineer: Django, REST, RAG, LLM',
     )
 
     messages = [
-        {"role": "system", "content": SYSTEM_INSTRUCTION},
-        {"role": "user", "content": build_prompt(job_desc, cv_text, report_text, rubric)},
+        {'role': 'system', 'content': SYSTEM_INSTRUCTION},
+        {'role': 'user', 'content': build_prompt(job_desc, cv_text, report_text, DEFAULT_RUBRIC)},
     ]
 
+    client = OpenRouterClient()
     try:
-        out = call_openrouter_chat(
+        out = client.chat(
             model=model_slug,
             messages=messages,
             temperature=0.0,
@@ -84,71 +86,72 @@ def process_job(job_id, model_slug):
             retries=3,
         )
 
+        # Validate and save
         try:
             validate_evaluation_result(out)
             job.result = out
-            job.status = "completed"
-            job.save()
         except Exception as ve:
-            job.result = {"error": f"Validation failed: {ve}", "raw": out}
-            job.status = "completed"
-            job.save()
+            job.result = {'error': f'Validation failed: {ve}', 'raw': out}
+
+        job.status = 'completed'
+        job.save(update_fields=['result', 'status'])
+
     except Exception as e:
-        job.result = {"error": str(e), "trace": traceback.format_exc()}
-        job.status = "completed"
-        job.save()
+        job.result = {
+            'error': str(e),
+            'trace': traceback.format_exc(limit=2),
+        }
+        job.status = 'completed'
+        job.save(update_fields=['result', 'status'])
 
 
+# ----- API Views -----
 class UploadView(APIView):
     """
-    POST /upload
-    Uploads a CV and project report, creates a Job.
+    Upload a CV and project report, creates a Job entry.
     """
     def post(self, request):
         serializer = UploadSerializer(data=request.data)
         if serializer.is_valid():
-            job = serializer.save()  # status defaults to "queued"
-            return Response(
-                {"id": job.id, "status": job.status},
-                status=status.HTTP_201_CREATED,
-            )
+            job = serializer.save()  # status defaults to 'queued'
+            return Response({'id': job.id, 'status': job.status}, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 class EvaluateView(APIView):
     """
     POST /evaluate
-    Starts evaluation of a job by ID.
-    Returns immediately with job status "queued".
+    Start evaluation for a given job_id.
+    Runs asynchronously and returns immediately.
     """
     def post(self, request):
-        job_id = request.data.get("id")
+        job_id = request.data.get('id')
         if not job_id:
-            return Response({"error": "Provide job id"}, status=400)
+            return Response({'error': 'Provide job id'}, status=status.HTTP_400_BAD_REQUEST)
+
         try:
             job = Job.objects.get(id=job_id)
         except Job.DoesNotExist:
-            return Response({"error": "Job not found"}, status=404)
+            return Response({'error': 'Job not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        model_slug = config("OPENROUTER_MODEL", default="replace-this-with-model-slug")
+        model_slug = config('OPENROUTER_MODEL', default='openrouter/auto')
 
-        # Run evaluation in background
-        t = threading.Thread(target=process_job, args=(job.id, model_slug), daemon=True)
-        t.start()
+        # Launch background thread
+        threading.Thread(target=process_job, args=(job.id, model_slug), daemon=True).start()
 
-        return Response({"id": job.id, "status": "queued"})
+        return Response({'id': job.id, 'status': 'queued'})
 
 
 class ResultView(APIView):
     """
     GET /result/{id}
-    Returns the current status and result of the evaluation job.
+    Retrieve the current status and result of the evaluation job.
     """
-    def get(self, request, job_id):
+    def get(self, request, job_id: int):
         try:
             job = Job.objects.get(id=job_id)
         except Job.DoesNotExist:
-            return Response({"error": "Job not found"}, status=404)
+            return Response({'error': 'Job not found'}, status=status.HTTP_404_NOT_FOUND)
 
         serializer = JobResultSerializer(job)
         return Response(serializer.data)

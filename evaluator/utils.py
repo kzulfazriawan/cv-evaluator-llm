@@ -1,23 +1,45 @@
 # evaluator/utils.py
+import os
 from PyPDF2 import PdfReader
 import docx
-import os
 
-def read_uploaded_file_text(filefield):
+
+def _read_txt(path: str) -> str:
+    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+        return f.read()
+
+
+def _read_pdf(path: str) -> str:
+    reader = PdfReader(path)
+    return '\n'.join(page.extract_text() or '' for page in reader.pages)
+
+
+def _read_docx(path: str) -> str:
+    doc = docx.Document(path)
+    return '\n'.join(p.text for p in doc.paragraphs)
+
+
+def read_uploaded_file_text(filefield) -> str:
+    """
+    Extract text content from an uploaded file (txt, pdf, docx).
+    Returns empty string if file is missing or unsupported.
+    """
     if not filefield:
-        return ""
+        return ''
+
     path = filefield.path
-    name = path.lower()
+    _, ext = os.path.splitext(path.lower())
+
     try:
-        if name.endswith(".txt"):
-            return open(path, "r", encoding="utf-8", errors="ignore").read()
-        if name.endswith(".pdf"):
-            r = PdfReader(path)
-            texts = [p.extract_text() or "" for p in r.pages]
-            return "\n".join(texts)
-        if name.endswith(".docx"):
-            doc = docx.Document(path)
-            return "\n".join(p.text for p in doc.paragraphs)
-    except Exception as e:
-        return f"[error reading file: {e}]"
-    return ""
+        if ext == '.txt':
+            return _read_txt(path)
+        elif ext == '.pdf':
+            return _read_pdf(path)
+        elif ext == '.docx':
+            return _read_docx(path)
+    except Exception:
+        # Could log error here for debugging
+        return ''
+
+    # Unsupported extension
+    return ''
